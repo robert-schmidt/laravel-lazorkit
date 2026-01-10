@@ -120,19 +120,40 @@ class LazorkitWalletManager {
 
             // Set up message handler
             this.messageHandler = (event) => {
-                // Verify origin
-                if (!this.config.allowedOrigins.includes(event.origin)) {
+                // Verify origin - check if origin includes portal hostname
+                const portalHostname = new URL(this.config.portalUrl).hostname;
+                if (!event.origin.includes(portalHostname)) {
                     return;
                 }
 
-                const data = event.data;
+                const { type, data, error } = event.data;
 
-                if (data.type === 'lazorkit:connect:success') {
-                    this.handleConnectSuccess(data, resolve, reject);
-                } else if (data.type === 'lazorkit:connect:error') {
-                    this.handleConnectError(data, reject);
-                } else if (data.type === 'lazorkit:connect:cancel') {
-                    this.handleConnectCancel(reject);
+                // Handle error from portal
+                if (error) {
+                    this.handleConnectError({ error: error.message || 'Portal error' }, reject);
+                    return;
+                }
+
+                // Handle different message types from portal
+                switch (type) {
+                    case 'connect-result':
+                    case 'WALLET_CONNECTED':
+                        // Transform portal data to our expected format
+                        const connectData = {
+                            credentialId: data.credentialId,
+                            smartWalletAddress: data.smartWalletAddress,
+                            publicKey: data.publickey || data.publicKey,
+                            counter: data.counter || 0,
+                            connectionType: data.connectionType,
+                        };
+                        this.handleConnectSuccess(connectData, resolve, reject);
+                        break;
+                    case 'error':
+                        this.handleConnectError({ error: data?.message || 'Unknown error' }, reject);
+                        break;
+                    case 'close':
+                        this.handleConnectCancel(reject);
+                        break;
                 }
             };
 
@@ -293,60 +314,80 @@ class LazorkitWalletManager {
 
                 // Set up message handler for signing
                 const signHandler = async (event) => {
-                    if (!this.config.allowedOrigins.includes(event.origin)) {
+                    // Verify origin - check if origin includes portal hostname
+                    const portalHostname = new URL(this.config.portalUrl).hostname;
+                    if (!event.origin.includes(portalHostname)) {
                         return;
                     }
 
-                    const data = event.data;
+                    const { type, data, error } = event.data;
 
-                    if (data.type === 'lazorkit:sign:success') {
+                    // Handle error from portal
+                    if (error) {
                         window.removeEventListener('message', signHandler);
                         if (this.popup && !this.popup.closed) {
                             this.popup.close();
                         }
+                        reject(new Error(error.message || 'Portal error'));
+                        return;
+                    }
 
-                        // Submit signed transaction
-                        try {
-                            const submitResponse = await fetch('/api/lazorkit/transaction/submit', {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'X-CSRF-TOKEN': this.getCsrfToken(),
-                                },
-                                body: JSON.stringify({
-                                    serializedTransaction: data.serializedTransaction,
-                                    signature: data.signature,
-                                    counter: data.counter,
-                                }),
-                            });
-
-                            const result = await submitResponse.json();
-
-                            if (result.success) {
-                                resolve({
-                                    success: true,
-                                    signature: result.signature,
-                                    gasless: result.gasless || false,
-                                });
-                            } else {
-                                reject(new Error(result.error || 'Transaction failed'));
+                    switch (type) {
+                        case 'sign-result':
+                        case 'SIGNATURE_CREATED':
+                            window.removeEventListener('message', signHandler);
+                            if (this.popup && !this.popup.closed) {
+                                this.popup.close();
                             }
-                        } catch (error) {
-                            reject(error);
-                        }
 
-                    } else if (data.type === 'lazorkit:sign:error') {
-                        window.removeEventListener('message', signHandler);
-                        if (this.popup && !this.popup.closed) {
-                            this.popup.close();
-                        }
-                        reject(new Error(data.error || 'Signing failed'));
-                    } else if (data.type === 'lazorkit:sign:cancel') {
-                        window.removeEventListener('message', signHandler);
-                        if (this.popup && !this.popup.closed) {
-                            this.popup.close();
-                        }
-                        reject(new Error('Signing cancelled by user'));
+                            // Submit signed transaction
+                            try {
+                                const submitResponse = await fetch('/api/lazorkit/transaction/submit', {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json',
+                                        'X-CSRF-TOKEN': this.getCsrfToken(),
+                                    },
+                                    body: JSON.stringify({
+                                        serializedTransaction: data.signedPayload || data.msg,
+                                        signature: data.normalized || data.signature,
+                                        counter: data.counter || 0,
+                                        clientDataJsonBase64: data.clientDataJSONReturn,
+                                        authenticatorDataBase64: data.authenticatorDataReturn,
+                                    }),
+                                });
+
+                                const result = await submitResponse.json();
+
+                                if (result.success) {
+                                    resolve({
+                                        success: true,
+                                        signature: result.signature,
+                                        gasless: result.gasless || false,
+                                    });
+                                } else {
+                                    reject(new Error(result.error || 'Transaction failed'));
+                                }
+                            } catch (error) {
+                                reject(error);
+                            }
+                            break;
+
+                        case 'error':
+                            window.removeEventListener('message', signHandler);
+                            if (this.popup && !this.popup.closed) {
+                                this.popup.close();
+                            }
+                            reject(new Error(data?.message || 'Signing failed'));
+                            break;
+
+                        case 'close':
+                            window.removeEventListener('message', signHandler);
+                            if (this.popup && !this.popup.closed) {
+                                this.popup.close();
+                            }
+                            reject(new Error('Signing cancelled by user'));
+                            break;
                     }
                 };
 
