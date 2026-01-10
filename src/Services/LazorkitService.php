@@ -47,13 +47,16 @@ class LazorkitService
             }
         }
 
-        // Validate Solana address format (base58, 32-44 chars)
-        if (!preg_match('/^[1-9A-HJ-NP-Za-km-z]{32,44}$/', $data['smartWalletAddress'])) {
+        // Validate Solana address format (base58-like, 32-44 chars)
+        // Note: LazorKit portal may return addresses with chars not in strict base58
+        // (e.g., '0' and 'O' which are normally excluded). Accept alphanumeric for compatibility.
+        if (!preg_match('/^[A-Za-z0-9]{32,44}$/', $data['smartWalletAddress'])) {
             throw new PasskeyValidationException('Invalid smart wallet address format');
         }
 
-        // Validate credential ID (base64url format)
-        if (!preg_match('/^[A-Za-z0-9_-]+$/', $data['credentialId'])) {
+        // Validate credential ID (base64 or base64url format)
+        // Portal may return standard base64 (+/=) or base64url (_-)
+        if (!preg_match('/^[A-Za-z0-9_\-+\/=]+$/', $data['credentialId'])) {
             throw new PasskeyValidationException('Invalid credential ID format');
         }
 
