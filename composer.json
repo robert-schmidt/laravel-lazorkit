@@ -1,0 +1,52 @@
+{
+    "name": "lazorkit/laravel",
+    "description": "Solana passkey authentication for Laravel using LazorKit SDK",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "laravel",
+        "solana",
+        "passkey",
+        "webauthn",
+        "lazorkit",
+        "wallet",
+        "authentication"
+    ],
+    "authors": [
+        {
+            "name": "HeisenBERT Team"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "illuminate/support": "^11.0|^12.0",
+        "illuminate/http": "^11.0|^12.0",
+        "illuminate/database": "^11.0|^12.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0",
+        "phpunit/phpunit": "^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Lazorkit\\Laravel\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Lazorkit\\Laravel\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Lazorkit\\Laravel\\LazorkitServiceProvider"
+            ],
+            "aliases": {
+                "Lazorkit": "Lazorkit\\Laravel\\Facades\\Lazorkit"
+            }
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
