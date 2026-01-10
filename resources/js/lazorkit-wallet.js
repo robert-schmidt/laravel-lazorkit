@@ -99,7 +99,7 @@ class LazorkitWalletManager {
                 nonce: this.generateNonce(),
             });
 
-            const portalUrl = `${this.config.portalUrl}/connect?${params.toString()}`;
+            const portalUrl = `${this.config.portalUrl}?${params.toString()}`;
 
             // Open popup window
             const width = 420;
@@ -273,7 +273,7 @@ class LazorkitWalletManager {
                     nonce: this.generateNonce(),
                 });
 
-                const portalUrl = `${this.config.portalUrl}/sign?${params.toString()}`;
+                const portalUrl = `${this.config.portalUrl}?${params.toString()}`;
 
                 const width = 420;
                 const height = 600;
