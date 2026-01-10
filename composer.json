@@ -1,5 +1,5 @@
 {
-    "name": "lazorkit/laravel",
+    "name": "robert-schmidt/laravel-lazorkit",
     "description": "Solana passkey authentication for Laravel using LazorKit SDK",
     "type": "library",
     "license": "MIT",
@@ -14,9 +14,11 @@
     ],
     "authors": [
         {
-            "name": "HeisenBERT Team"
+            "name": "Robert Schmidt",
+            "homepage": "https://robertschmidt.dev"
         }
     ],
+    "homepage": "https://github.com/robert-schmidt/laravel-lazorkit",
     "require": {
         "php": "^8.2",
         "illuminate/support": "^11.0|^12.0",

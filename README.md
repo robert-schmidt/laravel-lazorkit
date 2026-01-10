@@ -25,7 +25,7 @@ A Laravel package for Solana passkey authentication using [LazorKit SDK](https:/
 ### Via Composer (Packagist)
 
 ```bash
-composer require lazorkit/laravel
+composer require robert-schmidt/laravel-lazorkit
 ```
 
 ### Via Git Submodule
@@ -45,7 +45,7 @@ Then add to your `composer.json`:
         }
     ],
     "require": {
-        "lazorkit/laravel": "@dev"
+        "robert-schmidt/laravel-lazorkit": "@dev"
     }
 }
 ```
