@@ -21,7 +21,8 @@ class LazorkitService
         $this->config = $config;
         $this->portalUrl = $config['portal_url'] ?? 'https://portal.lazor.sh';
         $this->paymasterUrl = $config['paymaster_url'] ?? 'https://kora.devnet.lazorkit.com';
-        $this->rpcUrl = $config['rpc_url'] ?? null;
+        // Use LazorKit RPC URL, or fall back to main Solana RPC from config
+        $this->rpcUrl = $config['rpc_url'] ?? config('services.solana.rpc_endpoint') ?? 'https://api.mainnet-beta.solana.com';
     }
 
     /**
@@ -40,18 +41,19 @@ class LazorkitService
     public function validatePortalResponse(array $data): array
     {
         // Required fields from portal
-        $required = ['credentialId', 'smartWalletAddress', 'publicKey'];
+        $required = ['credentialId', 'smartWalletAddress'];
         foreach ($required as $field) {
             if (empty($data[$field])) {
                 throw new PasskeyValidationException("Missing required field: {$field}");
             }
         }
 
-        // Validate Solana address format (base58-like, 32-44 chars)
-        // Note: LazorKit portal may return addresses with chars not in strict base58
-        // (e.g., '0' and 'O' which are normally excluded). Accept alphanumeric for compatibility.
-        if (!preg_match('/^[A-Za-z0-9]{32,44}$/', $data['smartWalletAddress'])) {
-            throw new PasskeyValidationException('Invalid smart wallet address format');
+        // Validate Solana address format using STRICT base58
+        // Base58 excludes: 0 (zero), O (uppercase o), I (uppercase i), l (lowercase L)
+        // Valid: 123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz
+        if (!preg_match('/^[1-9A-HJ-NP-Za-km-z]{32,44}$/', $data['smartWalletAddress'])) {
+            Log::error('Invalid base58 wallet address', ['address' => $data['smartWalletAddress']]);
+            throw new PasskeyValidationException('Invalid smart wallet address format (not valid base58)');
         }
 
         // Validate credential ID (base64 or base64url format)
@@ -60,9 +62,15 @@ class LazorkitService
             throw new PasskeyValidationException('Invalid credential ID format');
         }
 
-        // Validate public key is present and reasonably formatted
-        if (strlen($data['publicKey']) < 40) {
-            throw new PasskeyValidationException('Invalid public key format');
+        // publicKey is the P-256 passkey public key (not a Solana address)
+        // It can be a byte array (from React SDK) or a string (older format)
+        // Store it as JSON if it's an array
+        if (isset($data['publicKey'])) {
+            if (is_array($data['publicKey'])) {
+                $data['publicKey'] = json_encode($data['publicKey']);
+            } elseif (is_string($data['publicKey']) && strlen($data['publicKey']) < 40) {
+                throw new PasskeyValidationException('Invalid public key format');
+            }
         }
 
         // Validate counter if present
@@ -78,15 +86,21 @@ class LazorkitService
      */
     public function createOrUpdateCredential(array $validatedData, ?string $userAgent = null): PasskeyCredential
     {
+        $updateData = [
+            'smart_wallet_address' => $validatedData['smartWalletAddress'],
+            'user_agent' => $userAgent ? substr($userAgent, 0, 500) : null,
+            'counter' => $validatedData['counter'] ?? 0,
+            'last_used_at' => now(),
+        ];
+
+        // Only update public_key if provided (may be null from vanilla JS implementation)
+        if (!empty($validatedData['publicKey'])) {
+            $updateData['public_key'] = $validatedData['publicKey'];
+        }
+
         $credential = PasskeyCredential::updateOrCreate(
             ['credential_id' => $validatedData['credentialId']],
-            [
-                'public_key' => $validatedData['publicKey'],
-                'smart_wallet_address' => $validatedData['smartWalletAddress'],
-                'user_agent' => $userAgent ? substr($userAgent, 0, 500) : null,
-                'counter' => $validatedData['counter'] ?? 0,
-                'last_used_at' => now(),
-            ]
+            $updateData
         );
 
         // Fire appropriate event
@@ -210,5 +224,186 @@ class LazorkitService
         }
 
         return $count;
+    }
+
+    /**
+     * Look up smart wallet address on-chain by credential ID.
+     *
+     * The portal returns credentialId but not the smart wallet address.
+     * We need to compute the credential hash and look it up on-chain.
+     *
+     * @param string $credentialId Base64 encoded credential ID
+     * @return string|null The smart wallet address (base58) or null if not found
+     */
+    public function lookupSmartWalletOnChain(string $credentialId): ?string
+    {
+        if (!$this->rpcUrl) {
+            Log::warning('Cannot lookup smart wallet: RPC URL not configured');
+            return null;
+        }
+
+        try {
+            // Compute credential hash (SHA256 of base64-decoded credential ID)
+            $credentialBytes = base64_decode($credentialId);
+            $credentialHash = hash('sha256', $credentialBytes, true);
+
+            // LazorKit program ID (mainnet)
+            $programId = 'Gsuz7YcA5sbMGVRXT3xSYhJBessW4xFC4xYsihNCqMFh';
+
+            // WalletDevice account discriminator
+            $discriminator = [35, 85, 31, 31, 179, 48, 136, 123];
+
+            // Query for WalletDevice accounts with matching credential hash
+            // Structure: discriminator (8) + passkey_pubkey (33) + credential_hash (32) + smart_wallet (32) + bump (1)
+            $response = $this->solanaRpcCall('getProgramAccounts', [
+                $programId,
+                [
+                    'encoding' => 'base64',
+                    'filters' => [
+                        // Filter by discriminator at offset 0
+                        [
+                            'memcmp' => [
+                                'offset' => 0,
+                                'bytes' => $this->bytesToBase58($discriminator),
+                            ],
+                        ],
+                        // Filter by credential hash at offset 41 (8 + 33)
+                        [
+                            'memcmp' => [
+                                'offset' => 41,
+                                'bytes' => $this->bytesToBase58(array_values(unpack('C*', $credentialHash))),
+                            ],
+                        ],
+                    ],
+                ],
+            ]);
+
+            if (empty($response) || !is_array($response)) {
+                Log::info('No WalletDevice account found for credential', [
+                    'credential_id' => substr($credentialId, 0, 20) . '...',
+                ]);
+                return null;
+            }
+
+            // Parse the first matching account
+            $account = $response[0];
+            $data = base64_decode($account['account']['data'][0]);
+
+            // Extract smart_wallet pubkey from offset 73 (8 + 33 + 32)
+            $smartWalletBytes = substr($data, 73, 32);
+            $smartWalletAddress = $this->bytesToBase58(array_values(unpack('C*', $smartWalletBytes)));
+
+            Log::info('Found smart wallet on-chain', [
+                'credential_id' => substr($credentialId, 0, 20) . '...',
+                'smart_wallet' => $smartWalletAddress,
+            ]);
+
+            return $smartWalletAddress;
+
+        } catch (\Exception $e) {
+            Log::error('Failed to lookup smart wallet on-chain', [
+                'error' => $e->getMessage(),
+                'credential_id' => substr($credentialId, 0, 20) . '...',
+            ]);
+            return null;
+        }
+    }
+
+    /**
+     * Make a Solana JSON-RPC call.
+     */
+    private function solanaRpcCall(string $method, array $params = []): mixed
+    {
+        $client = new \GuzzleHttp\Client(['timeout' => 30]);
+
+        $response = $client->post($this->rpcUrl, [
+            'json' => [
+                'jsonrpc' => '2.0',
+                'id' => 1,
+                'method' => $method,
+                'params' => $params,
+            ],
+        ]);
+
+        $result = json_decode($response->getBody()->getContents(), true);
+
+        if (isset($result['error'])) {
+            throw new \RuntimeException($result['error']['message'] ?? 'RPC error');
+        }
+
+        return $result['result'] ?? null;
+    }
+
+    /**
+     * Convert byte array to base58 string.
+     */
+    private function bytesToBase58(array $bytes): string
+    {
+        $alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+        if (function_exists('gmp_init')) {
+            return $this->bytesToBase58WithGmp($bytes, $alphabet);
+        } elseif (function_exists('bcadd')) {
+            return $this->bytesToBase58WithBcmath($bytes, $alphabet);
+        } else {
+            throw new \RuntimeException('Neither GMP nor BCMath extension is available for base58 encoding');
+        }
+    }
+
+    /**
+     * Base58 encode using GMP.
+     */
+    private function bytesToBase58WithGmp(array $bytes, string $alphabet): string
+    {
+        $value = gmp_init(0);
+        foreach ($bytes as $byte) {
+            $value = gmp_add(gmp_mul($value, 256), $byte);
+        }
+
+        $result = '';
+        while (gmp_cmp($value, 0) > 0) {
+            list($value, $remainder) = gmp_div_qr($value, 58);
+            $result = $alphabet[gmp_intval($remainder)] . $result;
+        }
+
+        // Handle leading zeros
+        foreach ($bytes as $byte) {
+            if ($byte === 0) {
+                $result = '1' . $result;
+            } else {
+                break;
+            }
+        }
+
+        return $result ?: '1';
+    }
+
+    /**
+     * Base58 encode using BCMath.
+     */
+    private function bytesToBase58WithBcmath(array $bytes, string $alphabet): string
+    {
+        $value = '0';
+        foreach ($bytes as $byte) {
+            $value = bcadd(bcmul($value, '256'), (string)$byte);
+        }
+
+        $result = '';
+        while (bccomp($value, '0') > 0) {
+            $remainder = bcmod($value, '58');
+            $result = $alphabet[(int)$remainder] . $result;
+            $value = bcdiv($value, '58', 0);
+        }
+
+        // Handle leading zeros
+        foreach ($bytes as $byte) {
+            if ($byte === 0) {
+                $result = '1' . $result;
+            } else {
+                break;
+            }
+        }
+
+        return $result ?: '1';
     }
 }

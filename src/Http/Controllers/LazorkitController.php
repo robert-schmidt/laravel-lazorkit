@@ -39,8 +39,10 @@ class LazorkitController extends Controller
         $validator = Validator::make($request->all(), [
             'credentialId' => 'required|string|max:255',
             'smartWalletAddress' => 'required|string|min:32|max:44',
-            'publicKey' => 'required|string',
-            'counter' => 'required|integer|min:0',
+            // publicKey is the P-256 passkey pubkey - can be string or array of bytes (optional from on-chain lookup)
+            'publicKey' => 'nullable',
+            // counter may not be available from on-chain lookup
+            'counter' => 'nullable|integer|min:0',
         ]);
 
         if ($validator->fails()) {
@@ -267,7 +269,7 @@ class LazorkitController extends Controller
         $walletAddress = session('wallet_address');
         $authMethod = session('auth_method');
 
-        if (!$walletAddress || $authMethod !== 'passkey') {
+        if (!$walletAddress) {
             return response()->json(['error' => 'Not authenticated'], 401);
         }
 
@@ -282,7 +284,14 @@ class LazorkitController extends Controller
             ]);
         } catch (\Exception $e) {
             Log::error('Failed to get balance', ['error' => $e->getMessage()]);
-            return response()->json(['error' => 'Failed to fetch balance'], 500);
+            // Return a graceful response with null balance instead of 500
+            return response()->json([
+                'success' => false,
+                'lamports' => null,
+                'sol' => null,
+                'formatted' => null,
+                'error' => 'Unable to fetch balance. RPC may be rate limited.',
+            ]);
         }
     }
 
@@ -292,9 +301,8 @@ class LazorkitController extends Controller
     public function getQRCode(Request $request): JsonResponse
     {
         $walletAddress = session('wallet_address');
-        $authMethod = session('auth_method');
 
-        if (!$walletAddress || $authMethod !== 'passkey') {
+        if (!$walletAddress) {
             return response()->json(['error' => 'Not authenticated'], 401);
         }
 
@@ -302,8 +310,7 @@ class LazorkitController extends Controller
         $size = min(max($size, 100), 400); // Clamp between 100-400
 
         try {
-            // Generate QR code using a simple SVG approach
-            $qrCode = $this->generateQRCodeSVG($walletAddress, $size);
+            $qrCode = $this->generateQRCodeUrl($walletAddress, $size);
 
             return response()->json([
                 'success' => true,
@@ -317,15 +324,56 @@ class LazorkitController extends Controller
     }
 
     /**
-     * Generate a simple QR code SVG data URL.
-     * Uses Google Charts API for simplicity (no additional dependencies).
+     * Generate QR code URL using QR Server API.
      */
-    private function generateQRCodeSVG(string $data, int $size): string
+    private function generateQRCodeUrl(string $data, int $size): string
     {
-        // For simplicity, return a link to Google Charts QR API
-        // In production, you might want to use a PHP QR library
+        // Use QR Server API (free, no API key required)
         $encodedData = urlencode('solana:' . $data);
-        return "https://chart.googleapis.com/chart?cht=qr&chs={$size}x{$size}&chl={$encodedData}&choe=UTF-8";
+        return "https://api.qrserver.com/v1/create-qr-code/?size={$size}x{$size}&data={$encodedData}&format=png";
+    }
+
+    /**
+     * Look up smart wallet address by credential ID.
+     * Called after portal returns to resolve the actual Solana address.
+     */
+    public function lookupSmartWallet(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'credentialId' => 'required|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'error' => 'Invalid request',
+                'validation_errors' => $validator->errors(),
+            ], 400);
+        }
+
+        try {
+            $smartWallet = $this->lazorkitService->lookupSmartWalletOnChain(
+                $request->input('credentialId')
+            );
+
+            if (!$smartWallet) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'Smart wallet not found on-chain. The wallet may need to be created first.',
+                    'needs_creation' => true,
+                ]);
+            }
+
+            return response()->json([
+                'success' => true,
+                'smartWalletAddress' => $smartWallet,
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Smart wallet lookup failed', ['error' => $e->getMessage()]);
+            return response()->json([
+                'error' => 'Failed to lookup smart wallet',
+            ], 500);
+        }
     }
 
     /**

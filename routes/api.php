@@ -37,6 +37,10 @@ Route::prefix($prefix)
         Route::get('/auth/status', [LazorkitController::class, 'status'])
             ->name('lazorkit.auth.status');
 
+        // Smart wallet lookup (resolve credential to on-chain wallet)
+        Route::post('/wallet/lookup', [LazorkitController::class, 'lookupSmartWallet'])
+            ->name('lazorkit.wallet.lookup');
+
         // Transaction endpoints (require authentication)
         Route::post('/transaction/prepare', [LazorkitController::class, 'prepareTransaction'])
             ->name('lazorkit.transaction.prepare');

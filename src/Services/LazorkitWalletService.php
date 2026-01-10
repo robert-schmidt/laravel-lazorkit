@@ -284,34 +284,48 @@ class LazorkitWalletService
      */
     public function getBalance(string $walletAddress): array
     {
-        $rpcUrl = $this->getRpcUrl();
-
-        if (!$rpcUrl) {
-            throw new LazorkitException('No RPC URL configured');
-        }
-
         try {
-            $response = Http::timeout(10)->post($rpcUrl, [
-                'jsonrpc' => '2.0',
-                'id' => 1,
-                'method' => 'getBalance',
-                'params' => [
-                    $walletAddress,
-                    ['commitment' => 'confirmed'],
-                ],
-            ]);
+            // Use the app's HeliusRpcService if available
+            if (class_exists(\App\Services\HeliusRpcService::class)) {
+                $heliusService = new \App\Services\HeliusRpcService();
+                $result = $heliusService->call('getBalance', [$walletAddress]);
 
-            if ($response->failed()) {
-                throw new LazorkitException('Failed to fetch balance: ' . $response->body());
+                if ($result === null) {
+                    throw new LazorkitException('Failed to fetch balance from Helius');
+                }
+
+                $lamports = $result['value'] ?? 0;
+            } else {
+                // Fallback to direct RPC call
+                $rpcUrl = $this->getRpcUrl();
+
+                if (!$rpcUrl) {
+                    throw new LazorkitException('No RPC URL configured');
+                }
+
+                $response = Http::timeout(10)->post($rpcUrl, [
+                    'jsonrpc' => '2.0',
+                    'id' => 1,
+                    'method' => 'getBalance',
+                    'params' => [
+                        $walletAddress,
+                        ['commitment' => 'confirmed'],
+                    ],
+                ]);
+
+                if ($response->failed()) {
+                    throw new LazorkitException('Failed to fetch balance: ' . $response->body());
+                }
+
+                $result = $response->json();
+
+                if (isset($result['error'])) {
+                    throw new LazorkitException('RPC error: ' . ($result['error']['message'] ?? 'Unknown error'));
+                }
+
+                $lamports = $result['result']['value'] ?? 0;
             }
 
-            $result = $response->json();
-
-            if (isset($result['error'])) {
-                throw new LazorkitException('RPC error: ' . ($result['error']['message'] ?? 'Unknown error'));
-            }
-
-            $lamports = $result['result']['value'] ?? 0;
             $sol = $lamports / 1_000_000_000; // Convert lamports to SOL
 
             return [
@@ -333,10 +347,21 @@ class LazorkitWalletService
      */
     private function getRpcUrl(): ?string
     {
-        // Check config for RPC URL
+        // First check for explicitly configured RPC URL
+        $configuredUrl = config('lazorkit.rpc_url');
+        if ($configuredUrl) {
+            return $configuredUrl;
+        }
+
+        // Also check the main solana config
+        $mainRpcUrl = config('solana.rpc_url');
+        if ($mainRpcUrl) {
+            return $mainRpcUrl;
+        }
+
+        // Fall back to public RPC endpoints based on network
         $network = config('lazorkit.network', 'devnet');
 
-        // Use public RPC endpoints based on network
         return match($network) {
             'mainnet', 'mainnet-beta' => 'https://api.mainnet-beta.solana.com',
             'testnet' => 'https://api.testnet.solana.com',

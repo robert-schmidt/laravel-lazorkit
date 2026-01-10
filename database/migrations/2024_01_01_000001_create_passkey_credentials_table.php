@@ -18,8 +18,9 @@ return new class extends Migration
             // WebAuthn credential ID (base64url encoded, unique per credential)
             $table->string('credential_id', 255)->unique();
 
-            // P-256 public key from WebAuthn (base64 encoded)
-            $table->text('public_key');
+            // P-256 public key from WebAuthn (base64 encoded or JSON byte array)
+            // Nullable because vanilla JS implementation may not always receive it
+            $table->text('public_key')->nullable();
 
             // Solana smart wallet address (PDA controlled by LazorKit program)
             $table->string('smart_wallet_address', 64)->unique();
