@@ -13,6 +13,8 @@ A Laravel package for Solana passkey authentication using [LazorKit SDK](https:/
 - **Wallet Management** - Balance checking, receive addresses, QR codes, transfers
 - **Laravel Integration** - Session-based auth, Eloquent models, publishable assets
 - **Account Linking** - Link passkeys to existing wallet accounts and vice versa
+- **PDA Derivation** - Deterministic smart wallet address derivation (no on-chain calls needed)
+- **Linked Account Queries** - Query balance/QR for linked passkey wallets
 
 ## Requirements
 
@@ -205,9 +207,22 @@ $credential = $service->getCredentialBySmartWallet($walletAddress);
 | `/api/lazorkit/auth/status` | GET | Check auth status |
 | `/api/lazorkit/transaction/prepare` | POST | Prepare transaction for signing |
 | `/api/lazorkit/transaction/submit` | POST | Submit signed transaction |
-| `/api/lazorkit/wallet/balance` | GET | Get wallet balance |
-| `/api/lazorkit/wallet/qr` | GET | Get QR code for wallet address |
+| `/api/lazorkit/wallet/balance` | GET | Get wallet balance (supports `?address=` for linked accounts) |
+| `/api/lazorkit/wallet/qr` | GET | Get QR code for wallet address (supports `?address=` for linked accounts) |
 | `/api/lazorkit/wallet/info` | GET | Get wallet info with balance |
+| `/api/lazorkit/wallet/derive` | POST | Derive smart wallet PDA from credential (no on-chain call) |
+| `/api/lazorkit/wallet/lookup` | POST | Look up smart wallet on-chain |
+| `/api/lazorkit/wallet/create` | POST | Create smart wallet on-chain via paymaster |
+
+### Linked Account Support
+
+The `/wallet/balance` and `/wallet/qr` endpoints support an optional `address` query parameter to query linked accounts. This enables users who are logged in with a direct wallet to check the balance of their linked passkey wallet:
+
+```
+GET /api/lazorkit/wallet/balance?address=LinkedPasskeyWalletAddress
+```
+
+Security: The endpoint verifies the requested address is either the session wallet or a linked account before returning data.
 
 ## Events
 

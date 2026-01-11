@@ -37,9 +37,17 @@ Route::prefix($prefix)
         Route::get('/auth/status', [LazorkitController::class, 'status'])
             ->name('lazorkit.auth.status');
 
-        // Smart wallet lookup (resolve credential to on-chain wallet)
+        // Smart wallet derive (compute PDA from credential - no on-chain call)
+        Route::post('/wallet/derive', [LazorkitController::class, 'deriveSmartWallet'])
+            ->name('lazorkit.wallet.derive');
+
+        // Smart wallet lookup (verify wallet exists on-chain)
         Route::post('/wallet/lookup', [LazorkitController::class, 'lookupSmartWallet'])
             ->name('lazorkit.wallet.lookup');
+
+        // Smart wallet creation (create on-chain via paymaster)
+        Route::post('/wallet/create', [LazorkitController::class, 'createSmartWallet'])
+            ->name('lazorkit.wallet.create');
 
         // Transaction endpoints (require authentication)
         Route::post('/transaction/prepare', [LazorkitController::class, 'prepareTransaction'])

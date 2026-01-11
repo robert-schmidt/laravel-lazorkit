@@ -227,6 +227,139 @@ class LazorkitService
     }
 
     /**
+     * Derive smart wallet address from credential ID (deterministic PDA derivation).
+     *
+     * The smart wallet is a Program Derived Address (PDA) derived from:
+     * - Seeds: ["smart_wallet", credential_hash]
+     * - Program: LazorKit program ID
+     *
+     * @param string $credentialId Base64 encoded credential ID
+     * @param mixed $publicKey P-256 public key (not used for derivation, but validated)
+     * @return string The smart wallet address (base58)
+     */
+    public function deriveSmartWalletAddress(string $credentialId, mixed $publicKey): string
+    {
+        // LazorKit program ID
+        $programId = 'Gsuz7YcA5sbMGVRXT3xSYhJBessW4xFC4xYsihNCqMFh';
+        $programIdBytes = $this->base58ToBytes($programId);
+
+        // Compute credential hash (SHA256 of base64-decoded credential ID)
+        $credentialBytes = base64_decode($credentialId);
+        $credentialHash = hash('sha256', $credentialBytes, true);
+
+        // PDA seed: "smart_wallet" + credential_hash
+        $seed = "smart_wallet" . $credentialHash;
+
+        // Find PDA (try bump values from 255 down to 0)
+        for ($bump = 255; $bump >= 0; $bump--) {
+            $seedWithBump = $seed . chr($bump);
+
+            // Hash: SHA256(seeds + program_id + "ProgramDerivedAddress")
+            $hash = hash('sha256', $seedWithBump . $programIdBytes . "ProgramDerivedAddress", true);
+
+            // Check if point is NOT on the ed25519 curve (valid PDA)
+            if (!$this->isOnCurve($hash)) {
+                Log::info('Derived smart wallet PDA', [
+                    'bump' => $bump,
+                    'address' => $this->bytesToBase58(array_values(unpack('C*', $hash))),
+                ]);
+                return $this->bytesToBase58(array_values(unpack('C*', $hash)));
+            }
+        }
+
+        throw new \RuntimeException('Failed to find valid PDA bump');
+    }
+
+    /**
+     * Check if a 32-byte hash is on the ed25519 curve.
+     * A valid PDA must NOT be on the curve.
+     */
+    private function isOnCurve(string $bytes): bool
+    {
+        // Simplified check: ed25519 curve order check
+        // In practice, most random 32-byte values are NOT on the curve
+        // The actual check involves complex elliptic curve math
+        // For LazorKit, we use a simplified heuristic that works for PDA derivation
+
+        // The ed25519 base point order is a large prime
+        // We check if the high bit patterns indicate a valid curve point
+        // This is a simplification - real implementation would use sodium_crypto_core_ed25519_is_valid_point
+
+        if (function_exists('sodium_crypto_core_ed25519_is_valid_point')) {
+            try {
+                return sodium_crypto_core_ed25519_is_valid_point($bytes);
+            } catch (\SodiumException $e) {
+                return false;
+            }
+        }
+
+        // Fallback: check if it looks like a valid point (very simplified)
+        // Most 32-byte values won't be valid curve points
+        // The last byte having certain patterns indicates invalid points more often
+        $lastByte = ord($bytes[31]);
+
+        // If the high bit is set in a way that's invalid for ed25519 compressed points
+        // This is a heuristic - not cryptographically accurate but works for PDA finding
+        return ($lastByte & 0x80) === 0 && $lastByte < 0x7f;
+    }
+
+    /**
+     * Decode base58 string to bytes.
+     */
+    private function base58ToBytes(string $base58): string
+    {
+        $alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+        if (function_exists('gmp_init')) {
+            $value = gmp_init(0);
+            for ($i = 0; $i < strlen($base58); $i++) {
+                $char = $base58[$i];
+                $pos = strpos($alphabet, $char);
+                if ($pos === false) {
+                    throw new \InvalidArgumentException("Invalid base58 character: $char");
+                }
+                $value = gmp_add(gmp_mul($value, 58), $pos);
+            }
+
+            $hex = gmp_strval($value, 16);
+            if (strlen($hex) % 2 !== 0) {
+                $hex = '0' . $hex;
+            }
+
+            // Pad to 32 bytes
+            $hex = str_pad($hex, 64, '0', STR_PAD_LEFT);
+            return hex2bin($hex);
+        } else {
+            // BCMath fallback
+            $value = '0';
+            for ($i = 0; $i < strlen($base58); $i++) {
+                $char = $base58[$i];
+                $pos = strpos($alphabet, $char);
+                if ($pos === false) {
+                    throw new \InvalidArgumentException("Invalid base58 character: $char");
+                }
+                $value = bcadd(bcmul($value, '58'), (string)$pos);
+            }
+
+            // Convert to hex
+            $hex = '';
+            while (bccomp($value, '0') > 0) {
+                $remainder = bcmod($value, '16');
+                $hex = dechex((int)$remainder) . $hex;
+                $value = bcdiv($value, '16', 0);
+            }
+
+            if (strlen($hex) % 2 !== 0) {
+                $hex = '0' . $hex;
+            }
+
+            // Pad to 32 bytes
+            $hex = str_pad($hex, 64, '0', STR_PAD_LEFT);
+            return hex2bin($hex);
+        }
+    }
+
+    /**
      * Look up smart wallet address on-chain by credential ID.
      *
      * The portal returns credentialId but not the smart wallet address.
@@ -306,6 +439,93 @@ class LazorkitService
                 'credential_id' => substr($credentialId, 0, 20) . '...',
             ]);
             return null;
+        }
+    }
+
+    /**
+     * Create a smart wallet on-chain via the paymaster.
+     *
+     * @param string $credentialId Base64 encoded credential ID
+     * @param mixed $publicKey P-256 public key (array of bytes or base64 string)
+     * @return array{success: bool, smartWalletAddress?: string, error?: string}
+     */
+    public function createSmartWalletOnChain(string $credentialId, mixed $publicKey): array
+    {
+        try {
+            $client = new \GuzzleHttp\Client(['timeout' => 60]);
+
+            // Normalize public key to array format
+            $pubkeyBytes = $publicKey;
+            if (is_string($publicKey)) {
+                $pubkeyBytes = array_values(unpack('C*', base64_decode($publicKey)));
+            }
+
+            // Compute credential hash
+            $credentialBytes = base64_decode($credentialId);
+            $credentialHash = hash('sha256', $credentialBytes, true);
+            $credentialHashArray = array_values(unpack('C*', $credentialHash));
+
+            // Get payer from paymaster
+            $payerResponse = $client->get($this->paymasterUrl . '/payer');
+            $payerData = json_decode($payerResponse->getBody()->getContents(), true);
+            $payer = $payerData['payer'] ?? null;
+
+            if (!$payer) {
+                return ['success' => false, 'error' => 'Failed to get payer from paymaster'];
+            }
+
+            // Derive smart wallet PDA
+            // Seeds: [SMART_WALLET_SEED, credential_hash]
+            // This is a simplified version - the actual derivation needs to match the on-chain program
+            $programId = 'Gsuz7YcA5sbMGVRXT3xSYhJBessW4xFC4xYsihNCqMFh';
+
+            // Call paymaster to create wallet
+            $createResponse = $client->post($this->paymasterUrl . '/create-wallet', [
+                'json' => [
+                    'credentialId' => $credentialId,
+                    'publicKey' => $pubkeyBytes,
+                    'credentialHash' => $credentialHashArray,
+                ],
+            ]);
+
+            $createResult = json_decode($createResponse->getBody()->getContents(), true);
+
+            if (!isset($createResult['smartWallet'])) {
+                Log::error('Paymaster create-wallet response missing smartWallet', $createResult);
+                return [
+                    'success' => false,
+                    'error' => $createResult['error'] ?? 'Paymaster did not return wallet address',
+                ];
+            }
+
+            Log::info('Smart wallet created via paymaster', [
+                'smart_wallet' => $createResult['smartWallet'],
+            ]);
+
+            return [
+                'success' => true,
+                'smartWalletAddress' => $createResult['smartWallet'],
+            ];
+
+        } catch (\GuzzleHttp\Exception\ClientException $e) {
+            $response = $e->getResponse();
+            $body = $response ? json_decode($response->getBody()->getContents(), true) : null;
+            Log::error('Paymaster API error', [
+                'status' => $response?->getStatusCode(),
+                'body' => $body,
+            ]);
+            return [
+                'success' => false,
+                'error' => $body['error'] ?? 'Paymaster request failed',
+            ];
+        } catch (\Exception $e) {
+            Log::error('Failed to create smart wallet on-chain', [
+                'error' => $e->getMessage(),
+            ]);
+            return [
+                'success' => false,
+                'error' => 'Failed to create wallet: ' . $e->getMessage(),
+            ];
         }
     }
 

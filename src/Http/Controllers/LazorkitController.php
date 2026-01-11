@@ -263,14 +263,38 @@ class LazorkitController extends Controller
 
     /**
      * Get wallet balance.
+     * Accepts optional 'address' query parameter to check balance of a specific wallet
+     * (used when checking linked passkey wallet balance while logged in with regular wallet).
      */
-    public function getBalance(): JsonResponse
+    public function getBalance(Request $request): JsonResponse
     {
-        $walletAddress = session('wallet_address');
-        $authMethod = session('auth_method');
+        $sessionWallet = session('wallet_address');
 
-        if (!$walletAddress) {
+        if (!$sessionWallet) {
             return response()->json(['error' => 'Not authenticated'], 401);
+        }
+
+        // Allow querying specific wallet address (for linked accounts)
+        $queryAddress = $request->query('address');
+        $walletAddress = $queryAddress ?: $sessionWallet;
+
+        // Security: If querying a different address, verify it's a linked account
+        if ($queryAddress && $queryAddress !== $sessionWallet) {
+            $walletUser = \App\Models\WalletUser::find($sessionWallet);
+            $isLinkedAccount = $walletUser && $walletUser->linkedAccounts()
+                ->where('linked_wallet_address', $queryAddress)
+                ->exists();
+
+            // Also allow if it's a passkey credential linked to current user
+            $isPasskeyCredential = \Lazorkit\Laravel\Models\PasskeyCredential::where('smart_wallet_address', $queryAddress)
+                ->whereHas('walletUser', function ($q) use ($sessionWallet) {
+                    $q->where('wallet_address', $sessionWallet);
+                })
+                ->exists();
+
+            if (!$isLinkedAccount && !$isPasskeyCredential) {
+                return response()->json(['error' => 'Unauthorized to view this wallet balance'], 403);
+            }
         }
 
         try {
@@ -281,9 +305,10 @@ class LazorkitController extends Controller
                 'lamports' => $balance['lamports'],
                 'sol' => $balance['sol'],
                 'formatted' => $balance['formatted'],
+                'address' => $walletAddress,
             ]);
         } catch (\Exception $e) {
-            Log::error('Failed to get balance', ['error' => $e->getMessage()]);
+            Log::error('Failed to get balance', ['error' => $e->getMessage(), 'address' => $walletAddress]);
             // Return a graceful response with null balance instead of 500
             return response()->json([
                 'success' => false,
@@ -297,13 +322,31 @@ class LazorkitController extends Controller
 
     /**
      * Get QR code for wallet address.
+     * Accepts optional 'address' query parameter to generate QR for a specific wallet
+     * (used for linked passkey wallets).
      */
     public function getQRCode(Request $request): JsonResponse
     {
-        $walletAddress = session('wallet_address');
+        $sessionWallet = session('wallet_address');
 
-        if (!$walletAddress) {
+        if (!$sessionWallet) {
             return response()->json(['error' => 'Not authenticated'], 401);
+        }
+
+        // Allow querying specific wallet address (for linked accounts)
+        $queryAddress = $request->query('address');
+        $walletAddress = $queryAddress ?: $sessionWallet;
+
+        // Security: If querying a different address, verify it's a linked account
+        if ($queryAddress && $queryAddress !== $sessionWallet) {
+            $walletUser = \App\Models\WalletUser::find($sessionWallet);
+            $isLinkedAccount = $walletUser && $walletUser->linkedAccounts()
+                ->where('linked_wallet_address', $queryAddress)
+                ->exists();
+
+            if (!$isLinkedAccount) {
+                return response()->json(['error' => 'Unauthorized to generate QR for this wallet'], 403);
+            }
         }
 
         $size = (int) $request->input('size', 200);
@@ -331,6 +374,44 @@ class LazorkitController extends Controller
         // Use QR Server API (free, no API key required)
         $encodedData = urlencode('solana:' . $data);
         return "https://api.qrserver.com/v1/create-qr-code/?size={$size}x{$size}&data={$encodedData}&format=png";
+    }
+
+    /**
+     * Derive smart wallet address from credential ID (no on-chain lookup needed).
+     * The wallet PDA is deterministically derived from the credential hash.
+     */
+    public function deriveSmartWallet(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'credentialId' => 'required|string',
+            'publicKey' => 'required',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'error' => 'Invalid request',
+                'validation_errors' => $validator->errors(),
+            ], 400);
+        }
+
+        try {
+            $smartWallet = $this->lazorkitService->deriveSmartWalletAddress(
+                $request->input('credentialId'),
+                $request->input('publicKey')
+            );
+
+            return response()->json([
+                'success' => true,
+                'smartWalletAddress' => $smartWallet,
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Smart wallet derivation failed', ['error' => $e->getMessage()]);
+            return response()->json([
+                'success' => false,
+                'error' => 'Failed to derive smart wallet address',
+            ], 500);
+        }
     }
 
     /**
@@ -372,6 +453,49 @@ class LazorkitController extends Controller
             Log::error('Smart wallet lookup failed', ['error' => $e->getMessage()]);
             return response()->json([
                 'error' => 'Failed to lookup smart wallet',
+            ], 500);
+        }
+    }
+
+    /**
+     * Create a new smart wallet on-chain via paymaster.
+     */
+    public function createSmartWallet(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'credentialId' => 'required|string',
+            'publicKey' => 'required',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'error' => 'Invalid request',
+                'validation_errors' => $validator->errors(),
+            ], 400);
+        }
+
+        try {
+            $result = $this->lazorkitService->createSmartWalletOnChain(
+                $request->input('credentialId'),
+                $request->input('publicKey')
+            );
+
+            if (!$result['success']) {
+                return response()->json([
+                    'success' => false,
+                    'error' => $result['error'] ?? 'Failed to create wallet',
+                ], 400);
+            }
+
+            return response()->json([
+                'success' => true,
+                'smartWalletAddress' => $result['smartWalletAddress'],
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Smart wallet creation failed', ['error' => $e->getMessage()]);
+            return response()->json([
+                'error' => 'Failed to create smart wallet: ' . $e->getMessage(),
             ], 500);
         }
     }
