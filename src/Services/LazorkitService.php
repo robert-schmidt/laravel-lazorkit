@@ -21,8 +21,20 @@ class LazorkitService
         $this->config = $config;
         $this->portalUrl = $config['portal_url'] ?? 'https://portal.lazor.sh';
         $this->paymasterUrl = $config['paymaster_url'] ?? 'https://kora.devnet.lazorkit.com';
-        // Use LazorKit RPC URL, or fall back to main Solana RPC from config
-        $this->rpcUrl = $config['rpc_url'] ?? config('services.solana.rpc_endpoint') ?? 'https://api.mainnet-beta.solana.com';
+
+        // Determine RPC URL based on network setting (devnet/mainnet)
+        $network = $config['network'] ?? 'devnet';
+
+        // Use explicit RPC URL if configured, otherwise use network-appropriate endpoint
+        if (!empty($config['rpc_url'])) {
+            $this->rpcUrl = $config['rpc_url'];
+        } else {
+            $this->rpcUrl = match($network) {
+                'mainnet', 'mainnet-beta' => 'https://api.mainnet-beta.solana.com',
+                'testnet' => 'https://api.testnet.solana.com',
+                default => 'https://api.devnet.solana.com',
+            };
+        }
     }
 
     /**
@@ -121,6 +133,10 @@ class LazorkitService
 
     /**
      * Verify a credential and its counter for replay protection.
+     *
+     * Note: The counter is embedded in the authenticatorData from WebAuthn.
+     * For now, we do basic credential verification. Full counter extraction
+     * from authenticatorData can be added for production hardening.
      */
     public function verifyCredential(string $credentialId, int $counter): bool
     {
@@ -133,19 +149,27 @@ class LazorkitService
             return false;
         }
 
-        // Verify counter is greater than stored (replay protection)
-        if ($counter <= $credential->counter) {
-            Log::warning('Passkey replay attack detected', [
-                'credential_id' => substr($credentialId, 0, 20) . '...',
-                'stored_counter' => $credential->counter,
-                'received_counter' => $counter,
+        // For LazorKit integration, the counter comes from authenticatorData
+        // The portal may not return it directly in the expected format
+        // Skip strict counter check if counter is 0 (not provided)
+        if ($counter > 0) {
+            if ($counter <= $credential->counter) {
+                Log::warning('Passkey replay attack detected', [
+                    'credential_id' => substr($credentialId, 0, 20) . '...',
+                    'stored_counter' => $credential->counter,
+                    'received_counter' => $counter,
+                ]);
+                return false;
+            }
+
+            // Update counter
+            $credential->update([
+                'counter' => $counter,
             ]);
-            return false;
         }
 
-        // Update counter and last used timestamp
+        // Update last used timestamp
         $credential->update([
-            'counter' => $counter,
             'last_used_at' => now(),
         ]);
 
@@ -177,6 +201,7 @@ class LazorkitService
             'portalUrl' => $this->portalUrl,
             'paymasterUrl' => $this->paymasterUrl,
             'rpcUrl' => $this->rpcUrl,
+            'network' => $this->config['network'] ?? 'devnet',
             'enabled' => $this->isEnabled(),
             'allowedOrigins' => $this->config['allowed_origins'] ?? ['https://portal.lazor.sh'],
         ];

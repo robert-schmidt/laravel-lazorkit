@@ -139,6 +139,53 @@ class LazorkitController extends Controller
     }
 
     /**
+     * Update wallet address after SDK creation.
+     * Called when SDK derives a different address than our backend.
+     */
+    public function updateWallet(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'credentialId' => 'required|string',
+            'smartWalletAddress' => 'required|string|min:32|max:44',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'error' => 'Invalid request',
+                'validation_errors' => $validator->errors(),
+            ], 400);
+        }
+
+        $credentialId = $request->input('credentialId');
+        $newWalletAddress = $request->input('smartWalletAddress');
+
+        // Verify the session credential matches
+        $sessionCredentialId = session('lazorkit_credential_id');
+        if ($sessionCredentialId !== $credentialId) {
+            return response()->json(['error' => 'Credential mismatch'], 403);
+        }
+
+        // Update session
+        session(['wallet_address' => $newWalletAddress]);
+
+        // Update database record
+        $credential = PasskeyCredential::where('credential_id', $credentialId)->first();
+        if ($credential) {
+            $credential->update(['smart_wallet_address' => $newWalletAddress]);
+        }
+
+        Log::info('Updated wallet address after SDK creation', [
+            'old_address' => session('wallet_address'),
+            'new_address' => $newWalletAddress,
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'wallet_address' => $newWalletAddress,
+        ]);
+    }
+
+    /**
      * Prepare a transaction for passkey signing.
      */
     public function prepareTransaction(Request $request): JsonResponse
@@ -192,6 +239,9 @@ class LazorkitController extends Controller
         $validator = Validator::make($request->all(), [
             'serializedTransaction' => 'required|string',
             'signature' => 'required|string',
+            'authenticatorData' => 'nullable|string',
+            'signedPayload' => 'nullable|string',
+            'credentialId' => 'nullable|string',
             'counter' => 'required|integer|min:0',
         ]);
 
@@ -218,6 +268,9 @@ class LazorkitController extends Controller
             $result = $this->walletService->submitSignedTransaction([
                 'serializedTransaction' => $request->serializedTransaction,
                 'signature' => $request->signature,
+                'authenticatorData' => $request->authenticatorData,
+                'signedPayload' => $request->signedPayload,
+                'credentialId' => $credentialId,
                 'smartWalletAddress' => $walletAddress,
             ]);
 
@@ -416,7 +469,7 @@ class LazorkitController extends Controller
 
     /**
      * Look up smart wallet address by credential ID.
-     * Called after portal returns to resolve the actual Solana address.
+     * First checks our database, then falls back to on-chain lookup.
      */
     public function lookupSmartWallet(Request $request): JsonResponse
     {
@@ -431,15 +484,26 @@ class LazorkitController extends Controller
             ], 400);
         }
 
+        $credentialId = $request->input('credentialId');
+
         try {
-            $smartWallet = $this->lazorkitService->lookupSmartWalletOnChain(
-                $request->input('credentialId')
-            );
+            // First check our database
+            $credential = PasskeyCredential::where('credential_id', $credentialId)->first();
+            if ($credential && $credential->smart_wallet_address) {
+                return response()->json([
+                    'success' => true,
+                    'smartWalletAddress' => $credential->smart_wallet_address,
+                    'source' => 'database',
+                ]);
+            }
+
+            // Fallback to on-chain lookup (more expensive)
+            $smartWallet = $this->lazorkitService->lookupSmartWalletOnChain($credentialId);
 
             if (!$smartWallet) {
                 return response()->json([
                     'success' => false,
-                    'error' => 'Smart wallet not found on-chain. The wallet may need to be created first.',
+                    'error' => 'Smart wallet not found. The wallet may need to be created first.',
                     'needs_creation' => true,
                 ]);
             }
@@ -447,13 +511,16 @@ class LazorkitController extends Controller
             return response()->json([
                 'success' => true,
                 'smartWalletAddress' => $smartWallet,
+                'source' => 'on-chain',
             ]);
 
         } catch (\Exception $e) {
             Log::error('Smart wallet lookup failed', ['error' => $e->getMessage()]);
             return response()->json([
-                'error' => 'Failed to lookup smart wallet',
-            ], 500);
+                'success' => false,
+                'error' => 'Wallet lookup failed',
+                'needs_creation' => true,
+            ]);
         }
     }
 
@@ -534,6 +601,42 @@ class LazorkitController extends Controller
                 'balance' => null,
                 'balance_error' => 'Failed to fetch balance',
             ]);
+        }
+    }
+
+    /**
+     * RPC proxy endpoint to bypass CORS restrictions.
+     * Forwards JSON-RPC requests to the Solana RPC endpoint.
+     */
+    public function rpcProxy(Request $request): JsonResponse
+    {
+        $rpcUrl = $this->lazorkitService->getRpcUrl();
+
+        if (!$rpcUrl) {
+            return response()->json(['error' => 'RPC URL not configured'], 500);
+        }
+
+        try {
+            $response = \Illuminate\Support\Facades\Http::timeout(30)
+                ->withHeaders(['Content-Type' => 'application/json'])
+                ->post($rpcUrl, $request->all());
+
+            if ($response->failed()) {
+                Log::error('RPC proxy request failed', [
+                    'status' => $response->status(),
+                    'body' => $response->body(),
+                ]);
+                return response()->json([
+                    'error' => 'RPC request failed',
+                    'status' => $response->status(),
+                ], 502);
+            }
+
+            return response()->json($response->json());
+
+        } catch (\Exception $e) {
+            Log::error('RPC proxy error', ['error' => $e->getMessage()]);
+            return response()->json(['error' => 'RPC proxy error: ' . $e->getMessage()], 500);
         }
     }
 }

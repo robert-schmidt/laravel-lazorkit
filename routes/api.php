@@ -37,6 +37,9 @@ Route::prefix($prefix)
         Route::get('/auth/status', [LazorkitController::class, 'status'])
             ->name('lazorkit.auth.status');
 
+        Route::post('/auth/update-wallet', [LazorkitController::class, 'updateWallet'])
+            ->name('lazorkit.auth.update-wallet');
+
         // Smart wallet derive (compute PDA from credential - no on-chain call)
         Route::post('/wallet/derive', [LazorkitController::class, 'deriveSmartWallet'])
             ->name('lazorkit.wallet.derive');
@@ -68,4 +71,8 @@ Route::prefix($prefix)
 
         Route::get('/wallet/info', [LazorkitController::class, 'getWalletInfo'])
             ->name('lazorkit.wallet.info');
+
+        // RPC proxy endpoint (bypasses CORS for localhost development)
+        Route::post('/rpc', [LazorkitController::class, 'rpcProxy'])
+            ->name('lazorkit.rpc');
     });

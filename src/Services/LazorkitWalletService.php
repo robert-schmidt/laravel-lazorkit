@@ -368,4 +368,95 @@ class LazorkitWalletService
             default => 'https://api.devnet.solana.com',
         };
     }
+
+    /**
+     * Build a contract-based purchase transaction.
+     *
+     * This uses the HeisenBERT Payments smart contract for on-chain tracking
+     * and trustless split payments. Preferred over direct SOL transfers.
+     */
+    public function buildContractPurchaseTransaction(
+        string $buyerWallet,
+        ?string $sellerWallet,
+        int $amountLamports,
+        string $creationId
+    ): array {
+        // Check if escrow service is available and configured
+        if (!class_exists(\App\Services\SolanaEscrowService::class)) {
+            Log::warning('SolanaEscrowService not available, falling back to split payment');
+            return $this->buildFallbackSplitPayment($buyerWallet, $sellerWallet, $amountLamports, $creationId);
+        }
+
+        $escrowService = new \App\Services\SolanaEscrowService();
+
+        if (!$escrowService->isConfigured()) {
+            Log::warning('Escrow service not configured, falling back to split payment');
+            return $this->buildFallbackSplitPayment($buyerWallet, $sellerWallet, $amountLamports, $creationId);
+        }
+
+        // Build the contract instruction
+        $txData = $escrowService->createPurchaseTransaction(
+            $buyerWallet,
+            $sellerWallet,
+            $amountLamports,
+            $creationId
+        );
+
+        if (!$txData['success']) {
+            throw new LazorkitException($txData['error'] ?? 'Failed to build contract transaction');
+        }
+
+        return [
+            'instructions' => [$txData['instruction']],
+            'metadata' => [
+                'message' => 'HeisenBERT Purchase',
+                'label' => 'HeisenBERT',
+                'creationId' => $creationId,
+                'useEscrow' => true,
+                'programId' => $txData['programId'],
+            ],
+        ];
+    }
+
+    /**
+     * Fallback to direct split payment when escrow is not available.
+     */
+    private function buildFallbackSplitPayment(
+        string $buyerWallet,
+        ?string $sellerWallet,
+        int $amountLamports,
+        string $creationId
+    ): array {
+        // Get platform wallet from settings
+        $solanaService = new \App\Services\SolanaService();
+        $platformWallet = $solanaService->getPlatformWalletAddress();
+
+        if (!$platformWallet) {
+            throw new LazorkitException('Platform wallet not configured');
+        }
+
+        // Calculate 10% platform fee
+        $platformFee = intval($amountLamports * 0.10);
+        $sellerAmount = $amountLamports - $platformFee;
+
+        // If no seller (first purchase), all goes to platform
+        if (!$sellerWallet) {
+            return $this->buildTransferTransaction(
+                $buyerWallet,
+                $platformWallet,
+                $amountLamports,
+                "HeisenBERT Purchase: {$creationId}"
+            );
+        }
+
+        // Split payment
+        return $this->buildSplitPaymentTransaction(
+            $buyerWallet,
+            $sellerWallet,
+            $platformWallet,
+            $sellerAmount,
+            $platformFee,
+            "HeisenBERT Purchase: {$creationId}"
+        );
+    }
 }
